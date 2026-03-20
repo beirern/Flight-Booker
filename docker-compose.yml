@@ -18,14 +18,14 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "5001:5001"
     environment:
       DATABASE_URL: postgresql://flightbooker:${POSTGRES_PASSWORD}@db:5432/flightbooker
     depends_on:
       db:
         condition: service_healthy
     command: >
-      sh -c "python -c 'from app import init_db; init_db()' && gunicorn --bind 0.0.0.0:5000 --workers 2 app:app"
+      sh -c "python -c 'from app import init_db; init_db()' && gunicorn --bind 0.0.0.0:5001 --workers 2 app:app"
 
 volumes:
   pgdata:
