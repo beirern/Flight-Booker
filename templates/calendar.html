@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Calendar</title>
+
+  <!-- FullCalendar -->
+  <link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Google Sans", Roboto, Arial, sans-serif;
+      background: #f6f8fc;
+      color: #202124;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 12px 24px;
+      background: #fff;
+      border-bottom: 1px solid #e0e0e0;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    header h1 {
+      font-size: 22px;
+      font-weight: 400;
+      color: #5f6368;
+    }
+
+    header h1 span {
+      color: #1a73e8;
+      font-weight: 600;
+    }
+
+    #calendar-container {
+      max-width: 1200px;
+      margin: 24px auto;
+      padding: 0 24px;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+      padding: 24px;
+    }
+
+    /* FullCalendar overrides */
+    .fc-toolbar-title { font-size: 20px !important; font-weight: 500 !important; }
+    .fc-button-primary {
+      background: #1a73e8 !important;
+      border-color: #1a73e8 !important;
+    }
+    .fc-button-primary:hover {
+      background: #1557b0 !important;
+      border-color: #1557b0 !important;
+    }
+    .fc-button-active {
+      background: #1557b0 !important;
+    }
+    .fc-event { cursor: pointer; border-radius: 4px !important; border: none !important; }
+    .fc-day-today { background: #e8f0fe !important; }
+
+    /* Modal */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.4);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+
+    .modal {
+      background: #fff;
+      border-radius: 12px;
+      width: 420px;
+      max-width: 95vw;
+      box-shadow: 0 8px 28px rgba(0,0,0,0.25);
+      overflow: hidden;
+      animation: pop .15s ease-out;
+    }
+
+    @keyframes pop {
+      from { transform: scale(0.92); opacity: 0; }
+      to   { transform: scale(1);    opacity: 1; }
+    }
+
+    .modal-header {
+      padding: 20px 20px 16px;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .modal-color-bar {
+      width: 6px;
+      min-height: 40px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+
+    .modal-title-block { flex: 1; }
+
+    .modal-title {
+      font-size: 20px;
+      font-weight: 500;
+      line-height: 1.3;
+    }
+
+    .modal-time {
+      font-size: 13px;
+      color: #5f6368;
+      margin-top: 4px;
+    }
+
+    .modal-close {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: #5f6368;
+      font-size: 20px;
+      line-height: 1;
+      padding: 4px;
+      border-radius: 50%;
+      transition: background .15s;
+    }
+    .modal-close:hover { background: #f1f3f4; }
+
+    .modal-body {
+      padding: 0 20px 20px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .modal-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      font-size: 14px;
+    }
+
+    .modal-row .icon {
+      font-size: 18px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .modal-row .label {
+      color: #202124;
+      line-height: 1.5;
+    }
+
+    /* Booking form */
+    .modal-divider {
+      border: none;
+      border-top: 1px solid #e0e0e0;
+      margin: 4px 0;
+    }
+
+    .book-section {
+      padding: 0 20px 20px;
+    }
+
+    .book-section h3 {
+      font-size: 14px;
+      font-weight: 500;
+      margin-bottom: 12px;
+      color: #202124;
+    }
+
+    .book-fields {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .book-fields input {
+      padding: 8px 12px;
+      border: 1px solid #dadce0;
+      border-radius: 6px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color .15s;
+    }
+
+    .book-fields input:focus { border-color: #1a73e8; }
+
+    .book-error {
+      font-size: 13px;
+      color: #d93025;
+      display: none;
+      margin-top: 4px;
+    }
+
+    .book-btn {
+      margin-top: 12px;
+      width: 100%;
+      padding: 9px;
+      background: #1a73e8;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background .15s;
+    }
+
+    .book-btn:hover { background: #1557b0; }
+    .book-btn:disabled { background: #9aa0a6; cursor: default; }
+
+    .booked-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      color: #188038;
+      font-weight: 500;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>My <span>Calendar</span></h1>
+</header>
+
+<div id="calendar-container">
+  <div id="calendar"></div>
+</div>
+
+<!-- Event detail modal -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-header">
+      <div class="modal-color-bar" id="modal-color-bar"></div>
+      <div class="modal-title-block">
+        <div class="modal-title" id="modal-title"></div>
+        <div class="modal-time" id="modal-time"></div>
+      </div>
+      <button class="modal-close" id="modal-close" aria-label="Close">&#x2715;</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-row" id="modal-location-row">
+        <span class="icon">📍</span>
+        <span class="label" id="modal-location"></span>
+      </div>
+      <div class="modal-row" id="modal-desc-row">
+        <span class="icon">📝</span>
+        <span class="label" id="modal-desc"></span>
+      </div>
+    </div>
+
+    <hr class="modal-divider" />
+
+    <!-- Booking -->
+    <div class="book-section">
+      <!-- Not yet booked -->
+      <div id="book-form-section">
+        <h3>Book this flight</h3>
+        <div class="book-fields">
+          <input id="book-first-name" placeholder="First name" autocomplete="given-name" />
+          <input id="book-last-initial" placeholder="Last initial" maxlength="1" style="width:120px" />
+          <input id="book-phone" placeholder="Phone number" type="tel" autocomplete="tel" />
+        </div>
+        <div class="book-error" id="book-error"></div>
+        <button class="book-btn" id="book-submit">Book Flight</button>
+      </div>
+
+      <!-- Already booked -->
+      <div id="booked-section" style="display:none">
+        <div class="booked-badge">
+          <span>✓</span>
+          <span>Booked by <span id="booked-by-name"></span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  let currentFCEvent = null;
+
+  function formatRange(start, end, allDay) {
+    const opts = { weekday: "long", month: "long", day: "numeric", year: "numeric" };
+    if (allDay) {
+      return start.toLocaleDateString(undefined, opts);
+    }
+    const timeOpts = { hour: "numeric", minute: "2-digit" };
+    const day = start.toLocaleDateString(undefined, opts);
+    const s = start.toLocaleTimeString(undefined, timeOpts);
+    const e = end ? end.toLocaleTimeString(undefined, timeOpts) : "";
+    return `${day} · ${s}${e ? " – " + e : ""}`;
+  }
+
+  function showBooked(name) {
+    document.getElementById("book-form-section").style.display = "none";
+    document.getElementById("booked-section").style.display = "block";
+    document.getElementById("booked-by-name").textContent = name;
+  }
+
+  function openModal(info) {
+    currentFCEvent = info.event;
+    const { title, start, end, allDay, extendedProps, backgroundColor } = info.event;
+
+    document.getElementById("modal-title").textContent = title;
+    document.getElementById("modal-time").textContent = formatRange(start, end, allDay);
+    document.getElementById("modal-color-bar").style.background = backgroundColor || "#1a73e8";
+
+    const locRow = document.getElementById("modal-location-row");
+    if (extendedProps.location) {
+      document.getElementById("modal-location").textContent = extendedProps.location;
+      locRow.style.display = "flex";
+    } else {
+      locRow.style.display = "none";
+    }
+
+    const descRow = document.getElementById("modal-desc-row");
+    if (extendedProps.description) {
+      document.getElementById("modal-desc").textContent = extendedProps.description;
+      descRow.style.display = "flex";
+    } else {
+      descRow.style.display = "none";
+    }
+
+    // Reset booking form
+    document.getElementById("book-error").style.display = "none";
+    document.getElementById("book-error").textContent = "";
+    document.getElementById("book-first-name").value = "";
+    document.getElementById("book-last-initial").value = "";
+    document.getElementById("book-phone").value = "";
+    document.getElementById("book-submit").disabled = false;
+
+    if (extendedProps.booked) {
+      showBooked(extendedProps.bookedBy || "someone");
+    } else {
+      document.getElementById("book-form-section").style.display = "block";
+      document.getElementById("booked-section").style.display = "none";
+    }
+
+    document.getElementById("modal-overlay").classList.add("open");
+  }
+
+  function closeModal() {
+    document.getElementById("modal-overlay").classList.remove("open");
+    currentFCEvent = null;
+  }
+
+  document.getElementById("modal-close").addEventListener("click", closeModal);
+  document.getElementById("modal-overlay").addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeModal();
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+
+  document.getElementById("book-submit").addEventListener("click", async () => {
+    const firstName = document.getElementById("book-first-name").value.trim();
+    const lastInitial = document.getElementById("book-last-initial").value.trim();
+    const phone = document.getElementById("book-phone").value.trim();
+    const errEl = document.getElementById("book-error");
+
+    if (!firstName || !lastInitial || !phone) {
+      errEl.textContent = "Please fill in all fields.";
+      errEl.style.display = "block";
+      return;
+    }
+
+    const btn = document.getElementById("book-submit");
+    btn.disabled = true;
+
+    try {
+      const uid = currentFCEvent.id;
+      const res = await fetch(`/api/events/${encodeURIComponent(uid)}/book`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ first_name: firstName, last_initial: lastInitial, phone }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        errEl.textContent = data.error || "Booking failed.";
+        errEl.style.display = "block";
+        btn.disabled = false;
+        return;
+      }
+
+      // Update the FullCalendar event in place
+      currentFCEvent.setProp("title", data.title);
+      currentFCEvent.setExtendedProp("booked", true);
+      currentFCEvent.setExtendedProp("bookedBy", data.bookedBy);
+      document.getElementById("modal-title").textContent = data.title;
+      showBooked(data.bookedBy);
+    } catch (e) {
+      errEl.textContent = "Network error. Please try again.";
+      errEl.style.display = "block";
+      btn.disabled = false;
+    }
+  });
+
+  document.addEventListener("DOMContentLoaded", () => {
+    const cal = new FullCalendar.Calendar(document.getElementById("calendar"), {
+      initialView: "dayGridMonth",
+      headerToolbar: {
+        left: "prev,next today",
+        center: "title",
+        right: "dayGridMonth,timeGridWeek,timeGridDay",
+      },
+      height: "auto",
+      nowIndicator: true,
+      timeZone: "America/Los_Angeles",
+      events: "/api/events",
+      eventClick: openModal,
+    });
+    cal.render();
+  });
+</script>
+</body>
+</html>
