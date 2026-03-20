@@ -1,3 +1,4 @@
+import logging
 import os
 
 import psycopg2
@@ -9,11 +10,26 @@ from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
 ICAL_URL = "https://calendar.google.com/calendar/ical/4689879c573066382f0d2ae50dab1064f6c7f99f131987ae9fc3f02df1f94f24%40group.calendar.google.com/public/basic.ics"
 DATABASE_URL = os.environ["DATABASE_URL"]
+NTFY_URL = "https://ntfy.sh/nicola-b-flying-14587"
 
 LA = ZoneInfo("America/Los_Angeles")
+
+
+# ---------------------------------------------------------------------------
+# Notification helpers
+# ---------------------------------------------------------------------------
+
+def send_ntfy(title, body):
+    try:
+        r = requests.post(NTFY_URL, data=body, headers={"Title": title}, timeout=5)
+        r.raise_for_status()
+        logging.info("ntfy notification sent: %s", title)
+    except requests.exceptions.RequestException as e:
+        logging.warning("Failed to send ntfy notification (%s): %s", title, e)
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +172,12 @@ def book_event(uid):
     except psycopg2.errors.UniqueViolation:
         db.rollback()
         return jsonify({"error": "This flight is already booked"}), 409
+    except psycopg2.Error as e:
+        db.rollback()
+        logging.error("Database error during booking: %s", e)
+        return jsonify({"error": "Database error"}), 500
+
+    send_ntfy("New Booking", f"Name: {first_name} {last_initial}.\nPhone: {phone}\nEvent: {uid}")
 
     return jsonify({
         "title": "Flight Lesson (1/1)",
@@ -166,12 +188,20 @@ def book_event(uid):
 @app.route("/api/events/<path:uid>/book", methods=["DELETE"])
 def unbook_event(uid):
     db = get_db()
-    with db.cursor() as cur:
-        cur.execute("DELETE FROM bookings WHERE event_uid = %s", (uid,))
-        deleted = cur.rowcount
-    db.commit()
+    try:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM bookings WHERE event_uid = %s", (uid,))
+            deleted = cur.rowcount
+        db.commit()
+    except psycopg2.Error as e:
+        db.rollback()
+        logging.error("Database error during cancellation: %s", e)
+        return jsonify({"error": "Database error"}), 500
     if deleted == 0:
         return jsonify({"error": "No booking found"}), 404
+
+    send_ntfy("Booking Cancelled", f"Event: {uid}")
+
     return jsonify({"title": "Flight Lesson (0/1)"})
 
 
