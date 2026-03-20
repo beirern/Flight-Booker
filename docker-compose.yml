@@ -18,7 +18,7 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "5001:5001"
     environment:
       DATABASE_URL: postgresql://flightbooker:${POSTGRES_PASSWORD}@db:5432/flightbooker
     depends_on:
