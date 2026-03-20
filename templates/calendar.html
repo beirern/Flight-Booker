@@ -228,6 +228,28 @@
       color: #188038;
       font-weight: 500;
     }
+
+    .unbook-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: #d93025;
+      font-size: 16px;
+      line-height: 1;
+      padding: 2px 4px;
+      border-radius: 50%;
+      transition: background .15s;
+      margin-left: auto;
+    }
+    .unbook-btn:hover { background: #fce8e6; }
+
+    .past-notice {
+      font-size: 14px;
+      color: #5f6368;
+      font-style: italic;
+    }
+
+    .fc-event.past-event { opacity: 0.45; filter: grayscale(60%); }
   </style>
 </head>
 <body>
@@ -283,7 +305,13 @@
         <div class="booked-badge">
           <span>✓</span>
           <span>Booked by <span id="booked-by-name"></span></span>
+          <button class="unbook-btn" id="unbook-btn" aria-label="Remove booking" style="display:none">&#x2715;</button>
         </div>
+      </div>
+
+      <!-- Past event, not booked -->
+      <div id="past-notice" style="display:none">
+        <p class="past-notice">This flight has already passed.</p>
       </div>
     </div>
   </div>
@@ -304,10 +332,20 @@
     return `${day} · ${s}${e ? " – " + e : ""}`;
   }
 
-  function showBooked(name) {
+  function resetBookForm() {
+    document.getElementById("book-error").style.display = "none";
+    document.getElementById("book-error").textContent = "";
+    document.getElementById("book-first-name").value = "";
+    document.getElementById("book-last-initial").value = "";
+    document.getElementById("book-phone").value = "";
+    document.getElementById("book-submit").disabled = false;
+  }
+
+  function showBooked(name, showUnbook) {
     document.getElementById("book-form-section").style.display = "none";
     document.getElementById("booked-section").style.display = "block";
     document.getElementById("booked-by-name").textContent = name;
+    document.getElementById("unbook-btn").style.display = showUnbook ? "inline-block" : "none";
   }
 
   function openModal(info) {
@@ -334,19 +372,19 @@
       descRow.style.display = "none";
     }
 
-    // Reset booking form
-    document.getElementById("book-error").style.display = "none";
-    document.getElementById("book-error").textContent = "";
-    document.getElementById("book-first-name").value = "";
-    document.getElementById("book-last-initial").value = "";
-    document.getElementById("book-phone").value = "";
-    document.getElementById("book-submit").disabled = false;
+    resetBookForm();
 
-    if (extendedProps.booked) {
-      showBooked(extendedProps.bookedBy || "someone");
+    // Hide all booking states, then show the applicable one
+    document.getElementById("book-form-section").style.display = "none";
+    document.getElementById("booked-section").style.display = "none";
+    document.getElementById("past-notice").style.display = "none";
+
+    if (extendedProps.past && !extendedProps.booked) {
+      document.getElementById("past-notice").style.display = "block";
+    } else if (extendedProps.booked) {
+      showBooked(extendedProps.bookedBy || "someone", !extendedProps.past);
     } else {
       document.getElementById("book-form-section").style.display = "block";
-      document.getElementById("booked-section").style.display = "none";
     }
 
     document.getElementById("modal-overlay").classList.add("open");
@@ -399,11 +437,29 @@
       currentFCEvent.setExtendedProp("booked", true);
       currentFCEvent.setExtendedProp("bookedBy", data.bookedBy);
       document.getElementById("modal-title").textContent = data.title;
-      showBooked(data.bookedBy);
+      showBooked(data.bookedBy, true);
     } catch (e) {
       errEl.textContent = "Network error. Please try again.";
       errEl.style.display = "block";
       btn.disabled = false;
+    }
+  });
+
+  document.getElementById("unbook-btn").addEventListener("click", async () => {
+    const uid = currentFCEvent.id;
+    try {
+      const res = await fetch(`/api/events/${encodeURIComponent(uid)}/book`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) return;
+      currentFCEvent.setProp("title", data.title);
+      currentFCEvent.setExtendedProp("booked", false);
+      currentFCEvent.setExtendedProp("bookedBy", null);
+      document.getElementById("modal-title").textContent = data.title;
+      document.getElementById("booked-section").style.display = "none";
+      document.getElementById("book-form-section").style.display = "block";
+      resetBookForm();
+    } catch (e) {
+      // silently fail
     }
   });
 
@@ -420,6 +476,11 @@
       timeZone: "local",
       events: "/api/events",
       eventClick: openModal,
+      eventDidMount: function(info) {
+        if (info.event.extendedProps.past) {
+          info.el.classList.add('past-event');
+        }
+      },
     });
     cal.render();
   });

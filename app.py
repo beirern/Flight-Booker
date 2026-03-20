@@ -86,12 +86,25 @@ def fetch_events():
         uid = str(component.get("UID", ""))
 
         booking = booked.get(uid)
+
+        # Determine whether this event is in the past
+        end_dt = end.dt if end else (start.dt if start else None)
+        if end_dt is None:
+            past = False
+        elif isinstance(end_dt, datetime):
+            aware = end_dt.astimezone(LA) if end_dt.tzinfo is not None else end_dt.replace(tzinfo=LA)
+            past = aware < datetime.now(LA)
+        else:
+            # date-only
+            past = end_dt < date.today()
+
         event = {
             "id": uid,
             "title": f"Flight Lesson ({'1' if booking else '0'}/1)",
             "start": parse_dt(start.dt) if start else None,
             "end": parse_dt(end.dt) if end else None,
             "booked": bool(booking),
+            "past": past,
         }
         if booking:
             event["bookedBy"] = f"{booking['first_name']} {booking['last_initial']}."
@@ -148,6 +161,18 @@ def book_event(uid):
         "title": "Flight Lesson (1/1)",
         "bookedBy": f"{first_name} {last_initial}.",
     })
+
+
+@app.route("/api/events/<path:uid>/book", methods=["DELETE"])
+def unbook_event(uid):
+    db = get_db()
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM bookings WHERE event_uid = %s", (uid,))
+        deleted = cur.rowcount
+    db.commit()
+    if deleted == 0:
+        return jsonify({"error": "No booking found"}), 404
+    return jsonify({"title": "Flight Lesson (0/1)"})
 
 
 @app.route("/api/events")
