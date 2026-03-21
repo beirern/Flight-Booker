@@ -37,6 +37,28 @@ bookings(event_uid PK, first_name, last_initial, phone, created_at TIMESTAMPTZ)
 
 **Key constraint:** There is no authentication. The calendar is fully public.
 
+## Testing
+
+After implementing a feature, always run the full unit test suite:
+
+```bash
+.venv/bin/python -m pytest tests/test_unit.py -q
+```
+
+For e2e tests (requires Chromium, run outside sandbox):
+
+```bash
+.venv/bin/python -m pytest tests/test_e2e.py --browser chromium
+```
+
+Install test dependencies if `.venv` doesn't exist:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements-test.txt && .venv/bin/playwright install chromium
+```
+
+Coverage must stay at **95%+** (enforced by `pyproject.toml`).
+
 ## Timezone Handling
 
 The backend (`parse_dt()`) converts all datetimes to `America/Los_Angeles` before sending them as ISO 8601 strings. FullCalendar on the frontend is configured with `timeZone: "local"` so the calendar and event modal both display in the viewer's local browser timezone.
