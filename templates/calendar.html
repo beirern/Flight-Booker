@@ -457,6 +457,19 @@
     currentFCEvent = null;
   }
 
+  document.getElementById("book-first-name").addEventListener("input", (e) => {
+    e.target.value = e.target.value.replace(/[^A-Za-z]/g, "");
+  });
+
+  document.getElementById("book-last-initial").addEventListener("input", (e) => {
+    e.target.value = e.target.value.replace(/[^A-Za-z]/g, "");
+  });
+
+  document.getElementById("book-phone").addEventListener("input", (e) => {
+    const digits = e.target.value.replace(/\D/g, "").slice(0, 10);
+    e.target.value = digits;
+  });
+
   document.getElementById("modal-close").addEventListener("click", closeModal);
   document.getElementById("modal-overlay").addEventListener("click", (e) => {
     if (e.target === e.currentTarget) closeModal();
@@ -474,7 +487,7 @@
       errEl.style.display = "block";
       return;
     }
-    if (!/^[A-Za-z ]+$/.test(firstName)) {
+    if (!/^[A-Za-z]+$/.test(firstName)) {
       errEl.textContent = "First name must contain only letters.";
       errEl.style.display = "block";
       return;
