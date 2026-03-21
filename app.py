@@ -321,7 +321,7 @@ def unbook_event(uid):
     if next_up:
         promoted_name = f"{next_up['first_name']} {next_up['last_initial']}."
         send_ntfy(
-            "Booking Cancelled — Waitlist Promoted",
+            "Booking Cancelled - Waitlist Promoted",
             f"Event: {uid}\nPromoted: {promoted_name}\nPhone: {next_up['phone']}",
         )
         return jsonify({
