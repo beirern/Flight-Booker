@@ -319,7 +319,7 @@
         <div class="book-fields">
           <input id="book-first-name" placeholder="First name" autocomplete="given-name" />
           <input id="book-last-initial" placeholder="Last initial" maxlength="1" style="width:120px" />
-          <input id="book-phone" placeholder="Phone number" type="tel" autocomplete="tel" />
+          <input id="book-phone" placeholder="Phone number (10 digits)" type="tel" autocomplete="tel" />
         </div>
         <div class="book-error" id="book-error"></div>
         <button class="book-btn" id="book-submit">Book Flight</button>
@@ -354,7 +354,6 @@
 
 <script>
   let currentFCEvent = null;
-  let lastSubmittedPhone = null;
 
   function formatRange(start, end, allDay) {
     const opts = { weekday: "long", month: "long", day: "numeric", year: "numeric" };
@@ -417,7 +416,6 @@
     }
 
     resetBookForm();
-    lastSubmittedPhone = null;
 
     // Hide all booking states, then show the applicable one
     document.getElementById("book-form-section").style.display = "none";
@@ -476,6 +474,22 @@
       errEl.style.display = "block";
       return;
     }
+    if (!/^[A-Za-z ]+$/.test(firstName)) {
+      errEl.textContent = "First name must contain only letters.";
+      errEl.style.display = "block";
+      return;
+    }
+    if (!/^[A-Za-z]$/.test(lastInitial)) {
+      errEl.textContent = "Last initial must be a single letter.";
+      errEl.style.display = "block";
+      return;
+    }
+    const phoneDigits = phone.replace(/\D/g, "");
+    if (phoneDigits.length !== 10) {
+      errEl.textContent = "Phone number must be 10 digits.";
+      errEl.style.display = "block";
+      return;
+    }
 
     const btn = document.getElementById("book-submit");
     btn.disabled = true;
@@ -498,7 +512,6 @@
 
       if (data.status === "waitlisted") {
         // Show waitlisted confirmation
-        lastSubmittedPhone = phone;
         document.getElementById("book-form-section").style.display = "none";
         document.getElementById("waitlist-position").textContent = data.waitlistPosition;
         const wlSection = document.getElementById("waitlisted-section");
@@ -576,25 +589,19 @@
       const res = await fetch(`/api/events/${encodeURIComponent(uid)}/waitlist`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: lastSubmittedPhone }),
+        body: JSON.stringify({ phone: document.getElementById("book-phone").value }),
       });
       const data = await res.json();
       if (!res.ok) return;
-      const newWlCount = data.waitlistCount || 0;
-      currentFCEvent.setExtendedProp("waitlistCount", newWlCount);
-      const slot = currentFCEvent.extendedProps.booked ? "1" : "0";
-      const newTitle = newWlCount > 0
-        ? `Flight Lesson (${slot}/1) +${newWlCount} WL`
-        : `Flight Lesson (${slot}/1)`;
-      currentFCEvent.setProp("title", newTitle);
-      document.getElementById("modal-title").textContent = newTitle;
+      currentFCEvent.setExtendedProp("waitlistCount", data.waitlistCount || 0);
+      currentFCEvent.setProp("title", data.title);
+      document.getElementById("modal-title").textContent = data.title;
       document.getElementById("waitlisted-section").style.display = "none";
       const formSection = document.getElementById("book-form-section");
       formSection.querySelector("h3").textContent = "Join Waitlist";
       document.getElementById("book-submit").textContent = "Join Waitlist";
       formSection.style.display = "block";
       resetBookForm();
-      lastSubmittedPhone = null;
     } catch (e) {
       // silently fail
     }

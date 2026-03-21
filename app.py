@@ -130,6 +130,14 @@ def format_description(raw):
     return raw
 
 
+def build_event_title(booked: bool, wl_count: int) -> str:
+    slot = "1" if booked else "0"
+    title = f"Flight Lesson ({slot}/1)"
+    if wl_count > 0:
+        title += f" +{wl_count} WL"
+    return title
+
+
 def fetch_events():
     response = requests.get(ICAL_URL, timeout=10)
     response.raise_for_status()
@@ -169,14 +177,9 @@ def fetch_events():
             # date-only
             past = end_dt < date.today()
 
-        slot = "1" if booking else "0"
-        title = f"Flight Lesson ({slot}/1)"
-        if booking and wl_count > 0:
-            title += f" +{wl_count} WL"
-
         event = {
             "id": uid,
-            "title": title,
+            "title": build_event_title(bool(booking), wl_count),
             "start": parse_dt(start.dt) if start else None,
             "end": parse_dt(end.dt) if end else None,
             "booked": bool(booking),
@@ -219,6 +222,15 @@ def book_event(uid):
     if not first_name or not last_initial or not phone:
         return jsonify({"error": "first_name, last_initial, and phone are required"}), 400
 
+    if not re.fullmatch(r"[A-Za-z ]+", first_name):
+        return jsonify({"error": "First name must contain only letters"}), 400
+    if not re.fullmatch(r"[A-Za-z]", last_initial):
+        return jsonify({"error": "Last initial must be a single letter"}), 400
+    phone_digits = re.sub(r"\D", "", phone)
+    if len(phone_digits) != 10:
+        return jsonify({"error": "Phone number must be 10 digits"}), 400
+    phone = phone_digits
+
     db = get_db()
     try:
         with db.cursor() as cur:
@@ -260,7 +272,7 @@ def book_event(uid):
         return jsonify({
             "status": "waitlisted",
             "waitlistPosition": position,
-            "title": f"Flight Lesson (1/1) +{position} WL",
+            "title": build_event_title(True, position),
         })
     except psycopg2.Error as e:
         db.rollback()
@@ -312,18 +324,15 @@ def unbook_event(uid):
             "Booking Cancelled — Waitlist Promoted",
             f"Event: {uid}\nPromoted: {promoted_name}\nPhone: {next_up['phone']}",
         )
-        title = "Flight Lesson (1/1)"
-        if wl_count > 0:
-            title += f" +{wl_count} WL"
         return jsonify({
-            "title": title,
+            "title": build_event_title(True, wl_count),
             "bookedBy": promoted_name,
             "promoted": True,
             "waitlistCount": wl_count,
         })
 
     send_ntfy("Booking Cancelled", f"Event: {uid}")
-    return jsonify({"title": "Flight Lesson (0/1)", "waitlistCount": 0})
+    return jsonify({"title": build_event_title(False, 0), "waitlistCount": 0})
 
 
 @app.route("/api/events/<path:uid>/waitlist", methods=["DELETE"])
@@ -332,6 +341,10 @@ def leave_waitlist(uid):
     phone = (data.get("phone") or "").strip()
     if not phone:
         return jsonify({"error": "phone is required"}), 400
+    phone_digits = re.sub(r"\D", "", phone)
+    if len(phone_digits) != 10:
+        return jsonify({"error": "Phone number must be 10 digits"}), 400
+    phone = phone_digits
 
     db = get_db()
     try:
@@ -340,7 +353,8 @@ def leave_waitlist(uid):
                 "DELETE FROM waitlist WHERE event_uid = %s AND phone = %s",
                 (uid, phone),
             )
-            deleted = cur.rowcount
+            if cur.rowcount == 0:
+                return jsonify({"error": "Not on waitlist"}), 404
             cur.execute("SELECT COUNT(*) FROM waitlist WHERE event_uid = %s", (uid,))
             wl_count = cur.fetchone()[0]
         db.commit()
@@ -349,10 +363,7 @@ def leave_waitlist(uid):
         logging.error("Database error leaving waitlist: %s", e)
         return jsonify({"error": "Database error"}), 500
 
-    if deleted == 0:
-        return jsonify({"error": "Not on waitlist"}), 404
-
-    return jsonify({"waitlistCount": wl_count})
+    return jsonify({"title": build_event_title(True, wl_count), "waitlistCount": wl_count})
 
 
 @app.route("/api/events")
