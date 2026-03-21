@@ -26,35 +26,42 @@ postgresql://flightbooker:${POSTGRES_PASSWORD}@db:5432/flightbooker
 This is a minimal single-file Flask app (`app.py`) with one HTML template (`templates/calendar.html`).
 
 **Data flow:**
-1. `/api/events` — fetches flight lesson events from a hardcoded public Google Calendar iCal URL, then joins with the local `bookings` PostgreSQL table to enrich each event with booking status
-2. `POST /api/events/<uid>/book` — inserts a booking row; `event_uid` is the primary key so double-booking is prevented at the DB level (returns 409 on conflict)
-3. The frontend is a single page using FullCalendar 6.1.15 (CDN) + vanilla JS. A modal opens on event click, showing event details and a booking form.
+1. `/api/events` — fetches flight lesson events from a hardcoded public Google Calendar iCal URL, then joins with the local `bookings` and `waitlist` PostgreSQL tables to enrich each event with booking/waitlist status
+2. `POST /api/events/<uid>/book` — if the event is unbooked, inserts into `bookings`; if already booked, falls back to inserting into `waitlist` (same form, different response)
+3. `DELETE /api/events/<uid>/book` — removes the booking; automatically promotes the first waitlist entry (by insertion order) to a booking if one exists
+4. `DELETE /api/events/<uid>/waitlist` — removes a specific person from the waitlist (identified by phone number)
+5. The frontend is a single page using FullCalendar 6.1.15 (CDN) + vanilla JS. A modal opens on event click, showing event details and a booking/waitlist form.
 
 **Database schema** (auto-created on startup via `init_db()`):
 ```sql
 bookings(event_uid PK, first_name, last_initial, phone, created_at TIMESTAMPTZ)
+waitlist(id SERIAL PK, event_uid, first_name, last_initial, phone, created_at TIMESTAMPTZ, UNIQUE(event_uid, phone))
 ```
 
 **Key constraint:** There is no authentication. The calendar is fully public.
 
 ## Testing
 
-After implementing a feature, always run the full unit test suite:
+All tests run via Docker using `docker-compose.test.yml`, which spins up a real Postgres container alongside the test runner.
 
+**Unit tests:**
 ```bash
-.venv/bin/python -m pytest tests/test_unit.py -q
+docker compose -f docker-compose.test.yml run --rm test python -m pytest tests/test_unit.py -q
 ```
 
-For e2e tests (requires Chromium, run outside sandbox):
-
+**E2e tests** (Playwright + Chromium + real Postgres):
 ```bash
-.venv/bin/python -m pytest tests/test_e2e.py --browser chromium
+docker compose -f docker-compose.test.yml run --rm test python -m pytest tests/test_e2e.py --browser chromium
 ```
 
-Install test dependencies if `.venv` doesn't exist:
-
+**All tests with coverage:**
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements-test.txt && .venv/bin/playwright install chromium
+docker compose -f docker-compose.test.yml run --rm test python -m pytest tests/test_unit.py tests/test_e2e.py --browser chromium
+```
+
+Tear down the DB container when done:
+```bash
+docker compose -f docker-compose.test.yml down
 ```
 
 Coverage must stay at **95%+** (enforced by `pyproject.toml`).

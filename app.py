@@ -64,6 +64,17 @@ def init_db():
                     created_at  TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS waitlist (
+                    id           SERIAL PRIMARY KEY,
+                    event_uid    TEXT NOT NULL,
+                    first_name   TEXT NOT NULL,
+                    last_initial TEXT NOT NULL,
+                    phone        TEXT NOT NULL,
+                    created_at   TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(event_uid, phone)
+                )
+            """)
     conn.close()
 
 
@@ -124,10 +135,13 @@ def fetch_events():
     response.raise_for_status()
     cal = Calendar.from_ical(response.content)
 
-    # Load all booked UIDs in one query
-    with get_db().cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+    # Load all booked UIDs and waitlist counts in one query each
+    db = get_db()
+    with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("SELECT event_uid, first_name, last_initial FROM bookings")
         booked = {row["event_uid"]: row for row in cur.fetchall()}
+        cur.execute("SELECT event_uid, COUNT(*) as cnt FROM waitlist GROUP BY event_uid")
+        waitlist_counts = {row["event_uid"]: row["cnt"] for row in cur.fetchall()}
 
     events = []
     for component in cal.walk():
@@ -142,6 +156,7 @@ def fetch_events():
         uid = str(component.get("UID", ""))
 
         booking = booked.get(uid)
+        wl_count = waitlist_counts.get(uid, 0)
 
         # Determine whether this event is in the past
         end_dt = end.dt if end else (start.dt if start else None)
@@ -154,13 +169,19 @@ def fetch_events():
             # date-only
             past = end_dt < date.today()
 
+        slot = "1" if booking else "0"
+        title = f"Flight Lesson ({slot}/1)"
+        if booking and wl_count > 0:
+            title += f" +{wl_count} WL"
+
         event = {
             "id": uid,
-            "title": f"Flight Lesson ({'1' if booking else '0'}/1)",
+            "title": title,
             "start": parse_dt(start.dt) if start else None,
             "end": parse_dt(end.dt) if end else None,
             "booked": bool(booking),
             "past": past,
+            "waitlistCount": wl_count,
         }
         if booking:
             event["bookedBy"] = f"{booking['first_name']} {booking['last_initial']}."
@@ -211,7 +232,36 @@ def book_event(uid):
         db.commit()
     except psycopg2.errors.UniqueViolation:
         db.rollback()
-        return jsonify({"error": "This flight is already booked"}), 409
+        # Flight is full — add to waitlist instead
+        try:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO waitlist (event_uid, first_name, last_initial, phone)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (uid, first_name, last_initial, phone),
+                )
+                cur.execute(
+                    "SELECT COUNT(*) FROM waitlist WHERE event_uid = %s",
+                    (uid,),
+                )
+                position = cur.fetchone()[0]
+            db.commit()
+        except psycopg2.errors.UniqueViolation:
+            db.rollback()
+            return jsonify({"error": "You are already on the waitlist"}), 409
+        except psycopg2.Error as e:
+            db.rollback()
+            logging.error("Database error during waitlist: %s", e)
+            return jsonify({"error": "Database error"}), 500
+
+        send_ntfy("New Waitlist Entry", f"Name: {first_name} {last_initial}.\nPhone: {phone}\nEvent: {uid}\nPosition: {position}")
+        return jsonify({
+            "status": "waitlisted",
+            "waitlistPosition": position,
+            "title": f"Flight Lesson (1/1) +{position} WL",
+        })
     except psycopg2.Error as e:
         db.rollback()
         logging.error("Database error during booking: %s", e)
@@ -220,6 +270,7 @@ def book_event(uid):
     send_ntfy("New Booking", f"Name: {first_name} {last_initial}.\nPhone: {phone}\nEvent: {uid}")
 
     return jsonify({
+        "status": "booked",
         "title": "Flight Lesson (1/1)",
         "bookedBy": f"{first_name} {last_initial}.",
     })
@@ -229,20 +280,79 @@ def book_event(uid):
 def unbook_event(uid):
     db = get_db()
     try:
-        with db.cursor() as cur:
+        with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("DELETE FROM bookings WHERE event_uid = %s", (uid,))
             deleted = cur.rowcount
+            if deleted == 0:
+                return jsonify({"error": "No booking found"}), 404
+
+            # Promote first waitlist entry if one exists
+            cur.execute(
+                "SELECT id, first_name, last_initial, phone FROM waitlist WHERE event_uid = %s ORDER BY id LIMIT 1",
+                (uid,),
+            )
+            next_up = cur.fetchone()
+            if next_up:
+                cur.execute(
+                    "INSERT INTO bookings (event_uid, first_name, last_initial, phone) VALUES (%s, %s, %s, %s)",
+                    (uid, next_up["first_name"], next_up["last_initial"], next_up["phone"]),
+                )
+                cur.execute("DELETE FROM waitlist WHERE id = %s", (next_up["id"],))
+                cur.execute("SELECT COUNT(*) AS cnt FROM waitlist WHERE event_uid = %s", (uid,))
+                wl_count = cur.fetchone()["cnt"]
         db.commit()
     except psycopg2.Error as e:
         db.rollback()
         logging.error("Database error during cancellation: %s", e)
         return jsonify({"error": "Database error"}), 500
-    if deleted == 0:
-        return jsonify({"error": "No booking found"}), 404
+
+    if next_up:
+        promoted_name = f"{next_up['first_name']} {next_up['last_initial']}."
+        send_ntfy(
+            "Booking Cancelled — Waitlist Promoted",
+            f"Event: {uid}\nPromoted: {promoted_name}\nPhone: {next_up['phone']}",
+        )
+        title = "Flight Lesson (1/1)"
+        if wl_count > 0:
+            title += f" +{wl_count} WL"
+        return jsonify({
+            "title": title,
+            "bookedBy": promoted_name,
+            "promoted": True,
+            "waitlistCount": wl_count,
+        })
 
     send_ntfy("Booking Cancelled", f"Event: {uid}")
+    return jsonify({"title": "Flight Lesson (0/1)", "waitlistCount": 0})
 
-    return jsonify({"title": "Flight Lesson (0/1)"})
+
+@app.route("/api/events/<path:uid>/waitlist", methods=["DELETE"])
+def leave_waitlist(uid):
+    data = request.get_json(force=True) or {}
+    phone = (data.get("phone") or "").strip()
+    if not phone:
+        return jsonify({"error": "phone is required"}), 400
+
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "DELETE FROM waitlist WHERE event_uid = %s AND phone = %s",
+                (uid, phone),
+            )
+            deleted = cur.rowcount
+            cur.execute("SELECT COUNT(*) FROM waitlist WHERE event_uid = %s", (uid,))
+            wl_count = cur.fetchone()[0]
+        db.commit()
+    except psycopg2.Error as e:
+        db.rollback()
+        logging.error("Database error leaving waitlist: %s", e)
+        return jsonify({"error": "Database error"}), 500
+
+    if deleted == 0:
+        return jsonify({"error": "Not on waitlist"}), 404
+
+    return jsonify({"waitlistCount": wl_count})
 
 
 @app.route("/api/events")

@@ -1,0 +1,22 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: flightbooker
+      POSTGRES_USER: flightbooker
+      POSTGRES_PASSWORD: testpassword
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flightbooker"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    environment:
+      DATABASE_URL: postgresql://flightbooker:testpassword@db:5432/flightbooker
+    depends_on:
+      db:
+        condition: service_healthy
