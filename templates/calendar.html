@@ -159,6 +159,16 @@
     .modal-row .label {
       color: #202124;
       line-height: 1.5;
+      white-space: pre-line;
+    }
+
+    .modal-row a {
+      color: #1a73e8;
+      text-decoration: none;
+    }
+
+    .modal-row a:hover {
+      text-decoration: underline;
     }
 
     /* Booking form */
@@ -358,7 +368,15 @@
 
     const locRow = document.getElementById("modal-location-row");
     if (extendedProps.location) {
-      document.getElementById("modal-location").textContent = extendedProps.location;
+      const mapsUrl = "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(extendedProps.location);
+      const locEl = document.getElementById("modal-location");
+      locEl.innerHTML = "";
+      const link = document.createElement("a");
+      link.href = mapsUrl;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = extendedProps.location;
+      locEl.appendChild(link);
       locRow.style.display = "flex";
     } else {
       locRow.style.display = "none";

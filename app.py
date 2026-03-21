@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 
 import psycopg2
 import psycopg2.extras
@@ -17,6 +18,7 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 NTFY_URL = "https://ntfy.sh/nicola-b-flying-14587"
 
 LA = ZoneInfo("America/Los_Angeles")
+_DESCRIPTION_SEP = re.compile(r"(?:\r?\n|(?<=\.)\s+(?=[A-Z][A-Za-z ]+:))")
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +82,43 @@ def parse_dt(dt):
     return str(dt)
 
 
+def format_description(raw):
+    """Parse iCal description key-value pairs and reformat for display."""
+    if not raw:
+        return None
+
+    segments = _DESCRIPTION_SEP.split(raw.rstrip("."))
+
+    fields = {}
+    for seg in segments:
+        seg = seg.strip().rstrip(".")
+        if ":" in seg:
+            key, _, val = seg.partition(":")
+            fields[key.strip()] = val.strip()
+
+    flight_type = fields.get("Flight Type", "")
+    aircraft = fields.get("Aircraft", "")
+
+    if flight_type == "Training":
+        course = fields.get("Course", "")
+        lesson = fields.get("Lesson", "")
+        parts = ["Flight Type: Training"]
+        if aircraft:
+            parts.append(f"Aircraft: {aircraft}")
+        if course:
+            parts.append(f"Course: {course}")
+        if lesson:
+            parts.append(f"Lesson: {lesson}")
+        return "\n".join(parts)
+    elif flight_type == "Leisure":
+        parts = ["Flight Type: Leisure"]
+        if aircraft:
+            parts.append(f"Aircraft: {aircraft}")
+        return "\n".join(parts)
+
+    return raw
+
+
 def fetch_events():
     response = requests.get(ICAL_URL, timeout=10)
     response.raise_for_status()
@@ -97,7 +136,8 @@ def fetch_events():
 
         start = component.get("DTSTART")
         end = component.get("DTEND")
-        description = str(component.get("DESCRIPTION", "")) or None
+        raw_description = str(component.get("DESCRIPTION", "")) or None
+        description = format_description(raw_description)
         location = str(component.get("LOCATION", "")) or None
         uid = str(component.get("UID", ""))
 
