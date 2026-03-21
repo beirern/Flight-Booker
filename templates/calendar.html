@@ -259,6 +259,21 @@
       font-style: italic;
     }
 
+    .waitlisted-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      color: #e37400;
+      font-weight: 500;
+    }
+
+    .waitlist-count {
+      font-size: 13px;
+      color: #5f6368;
+      margin-top: 6px;
+    }
+
     .fc-event.past-event { opacity: 0.45; filter: grayscale(60%); }
   </style>
 </head>
@@ -317,6 +332,16 @@
           <span>Booked by <span id="booked-by-name"></span></span>
           <button class="unbook-btn" id="unbook-btn" aria-label="Remove booking" style="display:none">&#x2715;</button>
         </div>
+        <div id="waitlist-count-row" class="waitlist-count" style="display:none"></div>
+      </div>
+
+      <!-- Waitlisted confirmation -->
+      <div id="waitlisted-section" style="display:none">
+        <div class="waitlisted-badge">
+          <span>⏳</span>
+          <span>You are #<span id="waitlist-position"></span> on the waitlist</span>
+          <button class="unbook-btn" id="leave-waitlist-btn" aria-label="Leave waitlist" style="display:none">&#x2715;</button>
+        </div>
       </div>
 
       <!-- Past event, not booked -->
@@ -329,6 +354,7 @@
 
 <script>
   let currentFCEvent = null;
+  let lastSubmittedPhone = null;
 
   function formatRange(start, end, allDay) {
     const opts = { weekday: "long", month: "long", day: "numeric", year: "numeric" };
@@ -391,18 +417,38 @@
     }
 
     resetBookForm();
+    lastSubmittedPhone = null;
 
     // Hide all booking states, then show the applicable one
     document.getElementById("book-form-section").style.display = "none";
     document.getElementById("booked-section").style.display = "none";
+    document.getElementById("waitlisted-section").style.display = "none";
     document.getElementById("past-notice").style.display = "none";
+    document.getElementById("waitlist-count-row").style.display = "none";
+
+    const wlCount = extendedProps.waitlistCount || 0;
 
     if (extendedProps.past && !extendedProps.booked) {
       document.getElementById("past-notice").style.display = "block";
     } else if (extendedProps.booked) {
       showBooked(extendedProps.bookedBy || "someone", !extendedProps.past);
+      if (wlCount > 0) {
+        const row = document.getElementById("waitlist-count-row");
+        row.textContent = `${wlCount} ${wlCount === 1 ? "person" : "people"} on waitlist`;
+        row.style.display = "block";
+      }
+      if (!extendedProps.past) {
+        // Show "Join Waitlist" form below the booked badge
+        const formSection = document.getElementById("book-form-section");
+        formSection.querySelector("h3").textContent = "Join Waitlist";
+        document.getElementById("book-submit").textContent = "Join Waitlist";
+        formSection.style.display = "block";
+      }
     } else {
-      document.getElementById("book-form-section").style.display = "block";
+      const formSection = document.getElementById("book-form-section");
+      formSection.querySelector("h3").textContent = "Book this flight";
+      document.getElementById("book-submit").textContent = "Book Flight";
+      formSection.style.display = "block";
     }
 
     document.getElementById("modal-overlay").classList.add("open");
@@ -450,12 +496,32 @@
         return;
       }
 
-      // Update the FullCalendar event in place
-      currentFCEvent.setProp("title", data.title);
-      currentFCEvent.setExtendedProp("booked", true);
-      currentFCEvent.setExtendedProp("bookedBy", data.bookedBy);
-      document.getElementById("modal-title").textContent = data.title;
-      showBooked(data.bookedBy, true);
+      if (data.status === "waitlisted") {
+        // Show waitlisted confirmation
+        lastSubmittedPhone = phone;
+        document.getElementById("book-form-section").style.display = "none";
+        document.getElementById("waitlist-position").textContent = data.waitlistPosition;
+        const wlSection = document.getElementById("waitlisted-section");
+        document.getElementById("leave-waitlist-btn").style.display = "inline-block";
+        wlSection.style.display = "block";
+        currentFCEvent.setExtendedProp("waitlistCount", data.waitlistPosition);
+        currentFCEvent.setProp("title", data.title);
+        document.getElementById("modal-title").textContent = data.title;
+      } else {
+        // Update the FullCalendar event in place
+        currentFCEvent.setProp("title", data.title);
+        currentFCEvent.setExtendedProp("booked", true);
+        currentFCEvent.setExtendedProp("bookedBy", data.bookedBy);
+        currentFCEvent.setExtendedProp("waitlistCount", 0);
+        document.getElementById("modal-title").textContent = data.title;
+        showBooked(data.bookedBy, true);
+        // Re-show the form as "Join Waitlist" so others can queue up
+        const formSection = document.getElementById("book-form-section");
+        formSection.querySelector("h3").textContent = "Join Waitlist";
+        document.getElementById("book-submit").textContent = "Join Waitlist";
+        resetBookForm();
+        formSection.style.display = "block";
+      }
     } catch (e) {
       errEl.textContent = "Network error. Please try again.";
       errEl.style.display = "block";
@@ -470,12 +536,65 @@
       const data = await res.json();
       if (!res.ok) return;
       currentFCEvent.setProp("title", data.title);
-      currentFCEvent.setExtendedProp("booked", false);
-      currentFCEvent.setExtendedProp("bookedBy", null);
+      currentFCEvent.setExtendedProp("waitlistCount", data.waitlistCount || 0);
       document.getElementById("modal-title").textContent = data.title;
       document.getElementById("booked-section").style.display = "none";
-      document.getElementById("book-form-section").style.display = "block";
+      document.getElementById("waitlist-count-row").style.display = "none";
+
+      if (data.promoted) {
+        // Slot immediately filled by next waitlist person
+        currentFCEvent.setExtendedProp("booked", true);
+        currentFCEvent.setExtendedProp("bookedBy", data.bookedBy);
+        showBooked(data.bookedBy, true);
+        if (data.waitlistCount > 0) {
+          const row = document.getElementById("waitlist-count-row");
+          row.textContent = `${data.waitlistCount} ${data.waitlistCount === 1 ? "person" : "people"} on waitlist`;
+          row.style.display = "block";
+        }
+        const formSection = document.getElementById("book-form-section");
+        formSection.querySelector("h3").textContent = "Join Waitlist";
+        document.getElementById("book-submit").textContent = "Join Waitlist";
+        formSection.style.display = "block";
+        resetBookForm();
+      } else {
+        currentFCEvent.setExtendedProp("booked", false);
+        currentFCEvent.setExtendedProp("bookedBy", null);
+        const formSection = document.getElementById("book-form-section");
+        formSection.querySelector("h3").textContent = "Book this flight";
+        document.getElementById("book-submit").textContent = "Book Flight";
+        formSection.style.display = "block";
+        resetBookForm();
+      }
+    } catch (e) {
+      // silently fail
+    }
+  });
+
+  document.getElementById("leave-waitlist-btn").addEventListener("click", async () => {
+    const uid = currentFCEvent.id;
+    try {
+      const res = await fetch(`/api/events/${encodeURIComponent(uid)}/waitlist`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone: lastSubmittedPhone }),
+      });
+      const data = await res.json();
+      if (!res.ok) return;
+      const newWlCount = data.waitlistCount || 0;
+      currentFCEvent.setExtendedProp("waitlistCount", newWlCount);
+      const slot = currentFCEvent.extendedProps.booked ? "1" : "0";
+      const newTitle = newWlCount > 0
+        ? `Flight Lesson (${slot}/1) +${newWlCount} WL`
+        : `Flight Lesson (${slot}/1)`;
+      currentFCEvent.setProp("title", newTitle);
+      document.getElementById("modal-title").textContent = newTitle;
+      document.getElementById("waitlisted-section").style.display = "none";
+      const formSection = document.getElementById("book-form-section");
+      formSection.querySelector("h3").textContent = "Join Waitlist";
+      document.getElementById("book-submit").textContent = "Join Waitlist";
+      formSection.style.display = "block";
       resetBookForm();
+      lastSubmittedPhone = null;
     } catch (e) {
       // silently fail
     }

@@ -1,116 +1,68 @@
-"""End-to-end Playwright tests against a live Flask server with mocked externals."""
+"""End-to-end Playwright tests against a live Flask server with a real Postgres DB.
+
+The DATABASE_URL environment variable must point to a live Postgres instance
+(provided by docker-compose.test.yml in CI / local Docker runs).
+"""
 
 import os
 import threading
 import time
 
-import psycopg2.errors
+import psycopg2
 import pytest
 from unittest.mock import MagicMock, patch
 
-os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
-
-from app import app as flask_app
 from tests.conftest import SAMPLE_ICAL
 
 pytestmark = pytest.mark.e2e
 
+_DB_URL = os.environ.get("DATABASE_URL", "postgresql://flightbooker:testpassword@localhost:5432/flightbooker")
 
-@pytest.fixture(scope="module")
-def _mock_externals():
-    """Module-scoped patches for iCal fetch and DB."""
-    # Mock iCal response
+
+@pytest.fixture(scope="session")
+def server_url():
+    """Initialise the DB schema, start the Flask dev server, and return its URL."""
+    os.environ["DATABASE_URL"] = _DB_URL
+
+    from app import app as flask_app, init_db
+    flask_app.config["TESTING"] = True
+    init_db()
+
     mock_resp = MagicMock()
     mock_resp.content = SAMPLE_ICAL
     mock_resp.raise_for_status = MagicMock()
 
-    # In-memory bookings store to simulate DB
-    bookings = {}
-
-    def fake_get_db():
-        mock_db = MagicMock()
-
-        class FakeCursor:
-            def __init__(self):
-                self.rowcount = 0
-                self._result = []
-
-            def execute(self, sql, params=None):
-                if "SELECT" in sql:
-                    self._result = [
-                        {"event_uid": uid, "first_name": b["first_name"], "last_initial": b["last_initial"]}
-                        for uid, b in bookings.items()
-                    ]
-                elif "INSERT" in sql:
-                    uid = params[0]
-                    if uid in bookings:
-                        raise psycopg2.errors.UniqueViolation()
-                    bookings[uid] = {
-                        "first_name": params[1],
-                        "last_initial": params[2],
-                        "phone": params[3],
-                    }
-                elif "DELETE" in sql:
-                    uid = params[0]
-                    if uid in bookings:
-                        del bookings[uid]
-                        self.rowcount = 1
-                    else:
-                        self.rowcount = 0
-
-            def fetchall(self):
-                return self._result
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                pass
-
-        mock_db.cursor.return_value = FakeCursor()
-        mock_db.commit = MagicMock()
-        mock_db.rollback = MagicMock()
-        return mock_db
-
-    with (
-        patch("app.requests.get", return_value=mock_resp),
-        patch("app.get_db", side_effect=fake_get_db),
-        patch("app.send_ntfy"),
-    ):
-        # Clear bookings between module runs
-        bookings.clear()
-        yield bookings
-
-
-@pytest.fixture(scope="module")
-def server_url(_mock_externals):
-    """Start the Flask app in a background thread and return its URL."""
-    flask_app.config["TESTING"] = True
-
-    server = None
     from werkzeug.serving import make_server
     server = make_server("127.0.0.1", 5199, flask_app)
     thread = threading.Thread(target=server.serve_forever)
     thread.daemon = True
-    thread.start()
 
-    # Wait for server to be ready
-    import urllib.request
-    for _ in range(50):
-        try:
-            urllib.request.urlopen("http://127.0.0.1:5199/")
-            break
-        except Exception:
-            time.sleep(0.1)
+    with (
+        patch("app.requests.get", return_value=mock_resp),
+        patch("app.send_ntfy"),
+    ):
+        thread.start()
+        import urllib.request
+        for _ in range(50):
+            try:
+                urllib.request.urlopen("http://127.0.0.1:5199/")
+                break
+            except Exception:
+                time.sleep(0.1)
 
-    yield "http://127.0.0.1:5199"
-    server.shutdown()
+        yield "http://127.0.0.1:5199"
+        server.shutdown()
 
 
 @pytest.fixture()
-def clean_bookings(_mock_externals):
-    """Clear bookings before each test."""
-    _mock_externals.clear()
+def clean_db():
+    """Truncate both tables before each test that uses the DB."""
+    conn = psycopg2.connect(_DB_URL)
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE bookings, waitlist RESTART IDENTITY")
+    conn.close()
+    yield
 
 
 def test_calendar_page_loads(page, server_url):
@@ -178,30 +130,27 @@ def test_modal_close_overlay_click(page, server_url):
     page.wait_for_selector(".fc-event", timeout=10000)
     page.locator(".fc-event").first.click()
     page.wait_for_selector("#modal-overlay.open")
-    # Click outside the modal dialog
     page.locator("#modal-overlay").click(position={"x": 10, "y": 10})
     modal = page.locator("#modal-overlay")
     assert "open" not in (modal.get_attribute("class") or "")
 
 
-def test_booking_validation(page, server_url, clean_bookings):
+def test_booking_validation(page, server_url, clean_db):
     page.goto(f"{server_url}/calendar")
     page.wait_for_selector(".fc-event", timeout=10000)
 
-    # Navigate to April 2026 to find future events
     _navigate_to_month(page, "April 2026")
     page.wait_for_selector(".fc-event", timeout=10000)
     page.locator(".fc-event").first.click()
     page.wait_for_selector("#modal-overlay.open")
 
-    # Try to submit empty form
     page.locator("#book-submit").click()
     error = page.locator("#book-error")
     assert error.is_visible()
     assert "fill in all fields" in error.text_content().lower()
 
 
-def test_book_flight(page, server_url, clean_bookings):
+def test_book_flight(page, server_url, clean_db):
     page.goto(f"{server_url}/calendar")
     page.wait_for_selector(".fc-event", timeout=10000)
 
@@ -210,19 +159,17 @@ def test_book_flight(page, server_url, clean_bookings):
     page.locator(".fc-event").first.click()
     page.wait_for_selector("#modal-overlay.open")
 
-    # Fill booking form
     page.locator("#book-first-name").fill("Alice")
     page.locator("#book-last-initial").fill("B")
     page.locator("#book-phone").fill("555-1234")
     page.locator("#book-submit").click()
 
-    # Should show booked state
     page.wait_for_selector("#booked-section:visible", timeout=5000)
     booked_name = page.locator("#booked-by-name")
     assert "Alice" in booked_name.text_content()
 
 
-def test_unbook_flight(page, server_url, clean_bookings):
+def test_unbook_flight(page, server_url, clean_db):
     page.goto(f"{server_url}/calendar")
     page.wait_for_selector(".fc-event", timeout=10000)
 
@@ -231,24 +178,21 @@ def test_unbook_flight(page, server_url, clean_bookings):
     page.locator(".fc-event").first.click()
     page.wait_for_selector("#modal-overlay.open")
 
-    # Book first
     page.locator("#book-first-name").fill("Bob")
     page.locator("#book-last-initial").fill("C")
     page.locator("#book-phone").fill("555-5678")
     page.locator("#book-submit").click()
     page.wait_for_selector("#booked-section:visible", timeout=5000)
 
-    # Now unbook
     page.locator("#unbook-btn").click()
     page.wait_for_selector("#book-form-section:visible", timeout=5000)
     assert page.locator("#book-first-name").is_visible()
 
 
-def test_past_event_shows_notice(page, server_url, clean_bookings):
+def test_past_event_shows_notice(page, server_url, clean_db):
     page.goto(f"{server_url}/calendar")
     page.wait_for_selector(".fc", timeout=10000)
 
-    # Navigate to January 2020 for the past event
     _navigate_to_month(page, "January 2020")
     page.wait_for_selector(".fc-event", timeout=10000)
     page.locator(".fc-event").first.click()
@@ -259,7 +203,7 @@ def test_past_event_shows_notice(page, server_url, clean_bookings):
     assert "passed" in past_notice.text_content().lower()
 
 
-def test_past_event_has_opacity_class(page, server_url, clean_bookings):
+def test_past_event_has_opacity_class(page, server_url, clean_db):
     page.goto(f"{server_url}/calendar")
     page.wait_for_selector(".fc", timeout=10000)
 
@@ -273,27 +217,22 @@ def test_calendar_view_switching(page, server_url):
     page.goto(f"{server_url}/calendar")
     page.wait_for_selector(".fc", timeout=10000)
 
-    # Switch to week view
     page.locator(".fc-timeGridWeek-button").click()
     assert page.locator(".fc-timegrid").is_visible()
 
-    # Switch to day view
     page.locator(".fc-timeGridDay-button").click()
     assert page.locator(".fc-timegrid").is_visible()
 
-    # Switch back to month view
     page.locator(".fc-dayGridMonth-button").click()
     assert page.locator(".fc-daygrid").is_visible()
 
 
-def test_location_link(page, server_url, clean_bookings):
+def test_location_link(page, server_url, clean_db):
     page.goto(f"{server_url}/calendar")
     page.wait_for_selector(".fc-event", timeout=10000)
 
     _navigate_to_month(page, "April 2026")
     page.wait_for_selector(".fc-event", timeout=10000)
-
-    # Find the event with location (test-uid-1)
     page.locator(".fc-event").first.click()
     page.wait_for_selector("#modal-overlay.open")
 
@@ -304,7 +243,8 @@ def test_location_link(page, server_url, clean_bookings):
         assert "google.com/maps" in href
 
 
-def test_double_book_shows_error(page, server_url, clean_bookings):
+def test_double_book_shows_waitlist_form(page, server_url, clean_db):
+    """After a flight is booked, reopening shows the Join Waitlist form."""
     page.goto(f"{server_url}/calendar")
     page.wait_for_selector(".fc-event", timeout=10000)
 
@@ -313,35 +253,154 @@ def test_double_book_shows_error(page, server_url, clean_bookings):
     page.locator(".fc-event").first.click()
     page.wait_for_selector("#modal-overlay.open")
 
-    # Book
     page.locator("#book-first-name").fill("Alice")
     page.locator("#book-last-initial").fill("B")
     page.locator("#book-phone").fill("555-1234")
     page.locator("#book-submit").click()
     page.wait_for_selector("#booked-section:visible", timeout=5000)
 
-    # Close and reopen - event should show as booked
+    # Close and reopen — event should show booked badge + Join Waitlist form
     page.locator("#modal-close").click()
     page.locator(".fc-event").first.click()
     page.wait_for_selector("#modal-overlay.open")
     assert page.locator("#booked-section").is_visible()
+    assert page.locator("#book-form-section").is_visible()
+    assert page.locator("#book-submit").text_content() == "Join Waitlist"
+
+
+def test_join_waitlist(page, server_url, clean_db):
+    """Book a flight, then a second person joins the waitlist."""
+    page.goto(f"{server_url}/calendar")
+    page.wait_for_selector(".fc-event", timeout=10000)
+    _navigate_to_month(page, "April 2026")
+    page.wait_for_selector(".fc-event", timeout=10000)
+    page.locator(".fc-event").first.click()
+    page.wait_for_selector("#modal-overlay.open")
+
+    # First person books
+    page.locator("#book-first-name").fill("Alice")
+    page.locator("#book-last-initial").fill("B")
+    page.locator("#book-phone").fill("555-1234")
+    page.locator("#book-submit").click()
+    page.wait_for_selector("#booked-section:visible", timeout=5000)
+
+    # Second person joins waitlist via the form shown below the booked badge
+    page.locator("#book-first-name").fill("Carol")
+    page.locator("#book-last-initial").fill("D")
+    page.locator("#book-phone").fill("555-9999")
+    page.locator("#book-submit").click()
+
+    page.wait_for_selector("#waitlisted-section:visible", timeout=5000)
+    assert page.locator("#waitlist-position").text_content() == "1"
+
+
+def test_leave_waitlist(page, server_url, clean_db):
+    """Join the waitlist then leave it."""
+    page.goto(f"{server_url}/calendar")
+    page.wait_for_selector(".fc-event", timeout=10000)
+    _navigate_to_month(page, "April 2026")
+    page.wait_for_selector(".fc-event", timeout=10000)
+    page.locator(".fc-event").first.click()
+    page.wait_for_selector("#modal-overlay.open")
+
+    # Book first person
+    page.locator("#book-first-name").fill("Alice")
+    page.locator("#book-last-initial").fill("B")
+    page.locator("#book-phone").fill("555-1234")
+    page.locator("#book-submit").click()
+    page.wait_for_selector("#booked-section:visible", timeout=5000)
+
+    # Second person joins waitlist
+    page.locator("#book-first-name").fill("Carol")
+    page.locator("#book-last-initial").fill("D")
+    page.locator("#book-phone").fill("555-9999")
+    page.locator("#book-submit").click()
+    page.wait_for_selector("#waitlisted-section:visible", timeout=5000)
+
+    # Leave the waitlist
+    page.locator("#leave-waitlist-btn").click()
+    page.wait_for_selector("#book-form-section:visible", timeout=5000)
+    assert page.locator("#waitlisted-section").is_hidden()
+
+
+def test_cancel_promotes_waitlist(page, server_url, clean_db):
+    """Cancel a booking and verify the waitlist person is automatically promoted."""
+    page.goto(f"{server_url}/calendar")
+    page.wait_for_selector(".fc-event", timeout=10000)
+    _navigate_to_month(page, "April 2026")
+    page.wait_for_selector(".fc-event", timeout=10000)
+    page.locator(".fc-event").first.click()
+    page.wait_for_selector("#modal-overlay.open")
+
+    # Book first person
+    page.locator("#book-first-name").fill("Alice")
+    page.locator("#book-last-initial").fill("B")
+    page.locator("#book-phone").fill("555-1234")
+    page.locator("#book-submit").click()
+    page.wait_for_selector("#booked-section:visible", timeout=5000)
+
+    # Second person joins waitlist
+    page.locator("#book-first-name").fill("Bob")
+    page.locator("#book-last-initial").fill("C")
+    page.locator("#book-phone").fill("555-5678")
+    page.locator("#book-submit").click()
+    page.wait_for_selector("#waitlisted-section:visible", timeout=5000)
+
+    # Close modal and reopen to get fresh state
+    page.locator("#modal-close").click()
+    page.locator(".fc-event").first.click()
+    page.wait_for_selector("#modal-overlay.open")
+
+    # Alice cancels
+    page.locator("#unbook-btn").click()
+
+    # Bob should now be shown as the booked person (wait for name to update)
+    page.locator("#booked-by-name").filter(has_text="Bob").wait_for(timeout=5000)
+    assert "Bob" in page.locator("#booked-by-name").text_content()
+
+
+def test_waitlist_count_displayed(page, server_url, clean_db):
+    """When someone is on the waitlist, the count shows in the modal title."""
+    page.goto(f"{server_url}/calendar")
+    page.wait_for_selector(".fc-event", timeout=10000)
+    _navigate_to_month(page, "April 2026")
+    page.wait_for_selector(".fc-event", timeout=10000)
+    page.locator(".fc-event").first.click()
+    page.wait_for_selector("#modal-overlay.open")
+
+    # Book first person
+    page.locator("#book-first-name").fill("Alice")
+    page.locator("#book-last-initial").fill("B")
+    page.locator("#book-phone").fill("555-1234")
+    page.locator("#book-submit").click()
+    page.wait_for_selector("#booked-section:visible", timeout=5000)
+
+    # Second person joins waitlist
+    page.locator("#book-first-name").fill("Bob")
+    page.locator("#book-last-initial").fill("C")
+    page.locator("#book-phone").fill("555-5678")
+    page.locator("#book-submit").click()
+    page.wait_for_selector("#waitlisted-section:visible", timeout=5000)
+
+    # Close and reopen — title should show +1 WL
+    page.locator("#modal-close").click()
+    page.locator(".fc-event").first.click()
+    page.wait_for_selector("#modal-overlay.open")
+    assert "+1 WL" in page.locator("#modal-title").text_content()
 
 
 def _navigate_to_month(page, target_month_year: str):
     """Click prev/next until FullCalendar shows the target month/year."""
-    # First ensure we're in month view
     month_btn = page.locator(".fc-dayGridMonth-button")
     if month_btn.is_visible():
         month_btn.click()
 
-    for _ in range(200):  # safety limit
+    for _ in range(200):
         title = page.locator(".fc-toolbar-title").text_content().strip()
         if target_month_year.lower() in title.lower():
             return
-        # Determine direction
         target_parts = target_month_year.split()
         target_year = int(target_parts[-1])
-        # Simple heuristic: parse current title
         current_parts = title.split()
         try:
             current_year = int(current_parts[-1])

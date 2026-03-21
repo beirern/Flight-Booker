@@ -116,9 +116,10 @@ class TestInitDb:
         from app import init_db
         init_db()
 
-        mock_cursor.execute.assert_called_once()
-        sql = mock_cursor.execute.call_args[0][0]
-        assert "CREATE TABLE IF NOT EXISTS bookings" in sql
+        assert mock_cursor.execute.call_count == 2
+        sqls = [call[0][0] for call in mock_cursor.execute.call_args_list]
+        assert any("CREATE TABLE IF NOT EXISTS bookings" in s for s in sqls)
+        assert any("CREATE TABLE IF NOT EXISTS waitlist" in s for s in sqls)
         mock_conn.close.assert_called_once()
 
 
@@ -167,9 +168,12 @@ class TestEventsRoute:
     @patch("app.get_db")
     def test_events_with_booking(self, mock_get_db, mock_requests_get, client):
         mock_requests_get.return_value = _ical_mock()
-        _, mock_db = make_mock_db(fetchall_return=[
-            {"event_uid": "test-uid-1", "first_name": "Alice", "last_initial": "B"}
-        ])
+        mock_cursor, mock_db = make_mock_db()
+        # First fetchall = bookings, second = waitlist counts (empty)
+        mock_cursor.fetchall.side_effect = [
+            [{"event_uid": "test-uid-1", "first_name": "Alice", "last_initial": "B"}],
+            [],
+        ]
         mock_get_db.return_value = mock_db
 
         resp = client.get("/api/events")
@@ -178,6 +182,24 @@ class TestEventsRoute:
         assert booked["booked"]
         assert booked["bookedBy"] == "Alice B."
         assert "(1/1)" in booked["title"]
+        assert booked["waitlistCount"] == 0
+
+    @patch("app.requests.get")
+    @patch("app.get_db")
+    def test_events_include_waitlist_count(self, mock_get_db, mock_requests_get, client):
+        mock_requests_get.return_value = _ical_mock()
+        mock_cursor, mock_db = make_mock_db()
+        mock_cursor.fetchall.side_effect = [
+            [{"event_uid": "test-uid-1", "first_name": "Alice", "last_initial": "B"}],
+            [{"event_uid": "test-uid-1", "cnt": 2}],
+        ]
+        mock_get_db.return_value = mock_db
+
+        resp = client.get("/api/events")
+        events = resp.get_json()
+        booked = [e for e in events if e["id"] == "test-uid-1"][0]
+        assert booked["waitlistCount"] == 2
+        assert "+2 WL" in booked["title"]
 
     @patch("app.requests.get")
     @patch("app.get_db")
@@ -239,6 +261,7 @@ class TestBookRoute:
         )
         assert resp.status_code == 200
         data = resp.get_json()
+        assert data["status"] == "booked"
         assert data["bookedBy"] == "Alice B."
         assert "(1/1)" in data["title"]
         mock_ntfy.assert_called_once()
@@ -267,10 +290,35 @@ class TestBookRoute:
         )
         assert resp.status_code == 400
 
+    @patch("app.send_ntfy")
     @patch("app.get_db")
-    def test_book_duplicate_returns_409(self, mock_get_db, client):
+    def test_book_when_full_adds_to_waitlist(self, mock_get_db, mock_ntfy, client):
         mock_cursor, mock_db = make_mock_db()
-        mock_cursor.execute.side_effect = psycopg2.errors.UniqueViolation()
+        mock_cursor.execute.side_effect = [
+            psycopg2.errors.UniqueViolation(),  # bookings INSERT fails
+            None,  # waitlist INSERT succeeds
+            None,  # SELECT COUNT
+        ]
+        mock_cursor.fetchone.return_value = (1,)
+        mock_get_db.return_value = mock_db
+
+        resp = client.post(
+            "/api/events/uid/book",
+            json={"first_name": "Bob", "last_initial": "C", "phone": "555"},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "waitlisted"
+        assert data["waitlistPosition"] == 1
+        mock_ntfy.assert_called_once()
+
+    @patch("app.get_db")
+    def test_book_already_on_waitlist_returns_409(self, mock_get_db, client):
+        mock_cursor, mock_db = make_mock_db()
+        mock_cursor.execute.side_effect = [
+            psycopg2.errors.UniqueViolation(),  # bookings INSERT fails
+            psycopg2.errors.UniqueViolation(),  # waitlist INSERT also fails
+        ]
         mock_get_db.return_value = mock_db
 
         resp = client.post(
@@ -278,8 +326,7 @@ class TestBookRoute:
             json={"first_name": "Alice", "last_initial": "B", "phone": "555"},
         )
         assert resp.status_code == 409
-        assert "already booked" in resp.get_json()["error"]
-        mock_db.rollback.assert_called_once()
+        assert "already on the waitlist" in resp.get_json()["error"]
 
     @patch("app.get_db")
     def test_book_db_error_returns_500(self, mock_get_db, client):
@@ -313,11 +360,33 @@ class TestUnbookRoute:
     def test_unbook_success(self, mock_get_db, mock_ntfy, client):
         mock_cursor, mock_db = make_mock_db()
         mock_cursor.rowcount = 1
+        mock_cursor.fetchone.return_value = None  # no waitlist entry
         mock_get_db.return_value = mock_db
 
         resp = client.delete("/api/events/test-uid-1/book")
         assert resp.status_code == 200
-        assert "(0/1)" in resp.get_json()["title"]
+        data = resp.get_json()
+        assert "(0/1)" in data["title"]
+        assert data["waitlistCount"] == 0
+        mock_ntfy.assert_called_once()
+
+    @patch("app.send_ntfy")
+    @patch("app.get_db")
+    def test_unbook_promotes_from_waitlist(self, mock_get_db, mock_ntfy, client):
+        mock_cursor, mock_db = make_mock_db()
+        mock_cursor.rowcount = 1
+        mock_cursor.fetchone.side_effect = [
+            {"id": 42, "first_name": "Bob", "last_initial": "C", "phone": "999"},
+            {"cnt": 0},  # COUNT after removal
+        ]
+        mock_get_db.return_value = mock_db
+
+        resp = client.delete("/api/events/test-uid-1/book")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["promoted"] is True
+        assert "Bob C." == data["bookedBy"]
+        assert data["waitlistCount"] == 0
         mock_ntfy.assert_called_once()
 
     @patch("app.get_db")
@@ -336,6 +405,45 @@ class TestUnbookRoute:
         mock_get_db.return_value = mock_db
 
         resp = client.delete("/api/events/uid/book")
+        assert resp.status_code == 500
+        mock_db.rollback.assert_called_once()
+
+
+class TestWaitlistRoute:
+    @patch("app.get_db")
+    def test_leave_missing_phone(self, mock_get_db, client):
+        resp = client.delete("/api/events/uid/waitlist", json={})
+        assert resp.status_code == 400
+        assert "phone" in resp.get_json()["error"]
+
+    @patch("app.get_db")
+    def test_leave_not_found(self, mock_get_db, client):
+        mock_cursor, mock_db = make_mock_db()
+        mock_cursor.rowcount = 0
+        mock_cursor.fetchone.return_value = (0,)
+        mock_get_db.return_value = mock_db
+
+        resp = client.delete("/api/events/uid/waitlist", json={"phone": "555"})
+        assert resp.status_code == 404
+
+    @patch("app.get_db")
+    def test_leave_success(self, mock_get_db, client):
+        mock_cursor, mock_db = make_mock_db()
+        mock_cursor.rowcount = 1
+        mock_cursor.fetchone.return_value = (0,)
+        mock_get_db.return_value = mock_db
+
+        resp = client.delete("/api/events/uid/waitlist", json={"phone": "555"})
+        assert resp.status_code == 200
+        assert resp.get_json()["waitlistCount"] == 0
+
+    @patch("app.get_db")
+    def test_leave_db_error(self, mock_get_db, client):
+        mock_cursor, mock_db = make_mock_db()
+        mock_cursor.execute.side_effect = psycopg2.Error("db broken")
+        mock_get_db.return_value = mock_db
+
+        resp = client.delete("/api/events/uid/waitlist", json={"phone": "555"})
         assert resp.status_code == 500
         mock_db.rollback.assert_called_once()
 
